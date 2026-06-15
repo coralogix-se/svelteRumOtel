@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 320" role="img" aria-label="Chocolate bar">
+  <rect width="480" height="320" fill="#3d2314"/>
+  <rect x="90" y="70" width="300" height="180" rx="12" fill="#5c3317" stroke="#2a1508" stroke-width="3"/>
+  <g fill="#4a2812">
+    <rect x="110" y="90" width="80" height="55" rx="4" fill="#6b3f1f"/>
+    <rect x="200" y="90" width="80" height="55" rx="4" fill="#6b3f1f"/>
+    <rect x="290" y="90" width="80" height="55" rx="4" fill="#6b3f1f"/>
+    <rect x="110" y="155" width="80" height="55" rx="4" fill="#6b3f1f"/>
+    <rect x="200" y="155" width="80" height="55" rx="4" fill="#6b3f1f"/>
+    <rect x="290" y="155" width="80" height="55" rx="4" fill="#6b3f1f"/>
+  </g>
+  <text x="240" y="290" text-anchor="middle" font-family="system-ui,sans-serif" font-size="22" fill="#d4a574">Chocolate</text>
+</svg>

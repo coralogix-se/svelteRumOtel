@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 320" role="img" aria-label="Duck on water">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#87ceeb"/>
+      <stop offset="100%" stop-color="#b8e0f5"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4a9fd4"/>
+      <stop offset="100%" stop-color="#2d6f9e"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="320" fill="url(#sky)"/>
+  <rect y="200" width="480" height="120" fill="url(#water)"/>
+  <ellipse cx="240" cy="210" rx="200" ry="12" fill="#ffffff" opacity="0.25"/>
+  <!-- body -->
+  <ellipse cx="250" cy="175" rx="72" ry="48" fill="#f4d03f"/>
+  <ellipse cx="310" cy="168" rx="38" ry="28" fill="#2e8b57"/>
+  <!-- head -->
+  <circle cx="175" cy="150" r="34" fill="#f4d03f"/>
+  <ellipse cx="148" cy="152" rx="22" ry="10" fill="#e67e22"/>
+  <circle cx="165" cy="142" r="5" fill="#1a1a1a"/>
+  <!-- wing -->
+  <ellipse cx="265" cy="178" rx="40" ry="22" fill="#d4ac0d"/>
+</svg>

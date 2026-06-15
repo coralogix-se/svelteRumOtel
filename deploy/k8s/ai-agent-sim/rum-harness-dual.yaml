@@ -1,0 +1,88 @@
+# One Deployment: runs rum-harness-loop, which hits BOTH frontends each cycle (US2 + EU1 RUM stacks).
+# Requires image: svelte-chatbot-rum-harness (see deploy/docker/Dockerfile.harness).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rum-harness-dual
+  namespace: ai-agent-sim
+  labels:
+    app: rum-harness-dual
+spec:
+  replicas: 1
+  # Tight clusters: default RollingUpdate can surge a second pod during rollout;
+  # with replicas=1 that needs spare CPU/memory/pod slots and often stays Pending.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: rum-harness-dual
+  template:
+    metadata:
+      labels:
+        app: rum-harness-dual
+    spec:
+      containers:
+        - name: harness
+          image: 827602716714.dkr.ecr.us-west-2.amazonaws.com/svelte-chatbot-rum-harness:latest
+          imagePullPolicy: Always
+          env:
+            # In-cluster URLs — hooks.server.ts proxies /api → CHAT_API_ORIGIN per frontend
+            # Frontend Services expose :80 → container :3000 (matches LoadBalancer listener).
+            - name: BASE_URL_TEAM_A
+              value: http://chat-frontend-team-a.ai-agent-sim.svc.cluster.local
+            - name: BASE_URL_TEAM_B
+              value: http://chat-frontend-team-b.ai-agent-sim.svc.cluster.local
+            # Gemini + Guardrails routinely exceed 30s on cluster cold paths
+            - name: RUM_HARNESS_CHAT_TIMEOUT_MS
+              value: "240000"
+            - name: RUM_HARNESS_NAV_TIMEOUT_MS
+              value: "120000"
+            - name: RUM_HARNESS_UI_READY_TIMEOUT_MS
+              value: "30000"
+            # Team A timeouts must not skip Team B (EU1 harness traffic)
+            - name: RUM_HARNESS_CONTINUE_ON_ERROR
+              value: "1"
+            # Use mounted /dev/shm (see volumes) — avoids Chromium spawn EAGAIN when /tmp is stressed
+            - name: RUM_HARNESS_DISABLE_DEV_SHM_USAGE
+              value: "0"
+            # If Chromium still hits spawn EAGAIN (cgroup pid limit), set to "1" — less stable but fewer processes
+            - name: RUM_HARNESS_CHROMIUM_SINGLE_PROCESS
+              value: "1"
+            - name: RUM_HARNESS_WAIT_RUM_RECORDING
+              value: "1"
+            - name: RUM_HARNESS_RUM_RECORDING_TIMEOUT_MS
+              value: "15000"
+            - name: RUM_HARNESS_RUM_FLUSH_MS
+              value: "15000"
+            - name: RUM_HARNESS_MIN_SESSION_MS
+              value: "60000"
+            - name: RUM_HARNESS_POST_QUESTIONS_DWELL_MS
+              value: "10000"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          # Restart pod if Chromium orphans pile up (fork/EAGAIN → no chat/RUM traffic).
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test "$(ls -1 /proc 2>/dev/null | wc -l)" -lt 400
+            initialDelaySeconds: 180
+            periodSeconds: 120
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 3Gi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

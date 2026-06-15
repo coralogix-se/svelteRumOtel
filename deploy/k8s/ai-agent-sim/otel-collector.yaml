@@ -1,0 +1,615 @@
+# In-namespace OTEL Collector — dual OTLP listeners for Team A (US2) and Team B (EU1).
+#
+#   Team A: OTLP/gRPC :34317 and OTLP/HTTP :34318 → receivers.otlp/team_a → logs/traces/metrics/… → US2
+#   Team B: OTLP/gRPC :34327 and OTLP/HTTP :34328 → receivers.otlp/team_b → … → EU1
+#
+# Span-derived metrics use **regular** spanmetrics (same as root `otel-collector-config.yaml`, NOT `namespace: compact`):
+# traces fork via `forward/sm_*` → `transform/compact` (trim resource attrs) → `spanmetrics/team_*` with `namespace: ""`
+# → Coralogix names like `calls` / `duration` (or `traces_span_metrics_*` depending on ingest mapping), not `compact_*`.
+# `transform/spanmetrics` on the metrics pipeline normalizes status.code on connector datapoints.
+#
+# Continuous profiling: `k8sattributes/profiles` + `transform/profiles` on profiles pipelines mirror Coralogix
+# otel-integration `profilesCollection` (second enrichment hop after node eBPF `profilesK8sAttributes`).
+#
+# k8sattributes enriches traces/logs/metrics from OTLP callers using the peer Socket IP ↔ Pod API lookup
+# (ServiceAccount RBAC below). Collector runs with dedicated SA in ai-agent-sim.
+# Mirrors otel-integration `k8sResourceAttributes` (gateway) + `kubernetesResources` (k8sobjects → resource catalog).
+# Host entity events (host.id) are collected by `otel-infra-agent.yaml` DaemonSet (`hostEntityEvents` preset).
+#
+# Coralogix APM **Transactions** (cgx.transaction / cgx.transaction.root): `groupbytrace` immediately before
+# `coralogix` processor (transactions.enabled) — same chain on BOTH team pipelines for parity.
+#
+# **Spans → service catalog Prometheus metrics** (`cx_service_catalog_*`, cx_source="spans2metrics") are produced
+# **inside Coralogix per tenant/host** after OTLP ingest. US2 sandbox keys may omit them while EU1/full accounts
+# show them — that gap is **not fixed** by swapping processors alone; to spike “same MCP as OB”, temporarily point
+# `otlp/cx_a` at the same ingress + Send-Your-Data key as the tenant where catalog metrics already appear.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-chatbot-config
+  namespace: ai-agent-sim
+  labels:
+    app: otel-collector-chatbot
+data:
+  config.yaml: |
+    receivers:
+      # Resource Catalog inventory (Helm `kubernetesResources` preset).
+      k8sobjects:
+        auth_type: serviceAccount
+        objects:
+          - name: pods
+            mode: watch
+          - name: namespaces
+            mode: watch
+          - name: nodes
+            mode: watch
+          - name: deployments
+            mode: watch
+          - name: replicasets
+            mode: watch
+          - name: statefulsets
+            mode: watch
+          - name: daemonsets
+            mode: watch
+          - name: jobs
+            mode: watch
+          - name: cronjobs
+            mode: watch
+
+      otlp/team_a:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:34317
+            max_recv_msg_size_mib: 20
+          http:
+            endpoint: 0.0.0.0:34318
+      otlp/team_b:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:34327
+            max_recv_msg_size_mib: 20
+          http:
+            endpoint: 0.0.0.0:34328
+
+    connectors:
+      forward/sm_a: {}
+      forward/sm_b: {}
+      spanmetrics/team_a:
+        add_resource_attributes: true
+        aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+        aggregation_cardinality_limit: 100000
+        dimensions:
+          - name: http.method
+          - name: cgx.transaction
+          - name: cgx.transaction.root
+          - name: status_code
+          - name: db.namespace
+          - name: db.operation.name
+          - name: db.collection.name
+          - name: db.system
+          - name: http.response.status_code
+          - name: rpc.grpc.status_code
+          - name: service.version
+        histogram:
+          unit: ms
+          explicit:
+            buckets: [1ms, 4ms, 10ms, 20ms, 50ms, 100ms, 200ms, 500ms, 1s, 2s, 5s]
+        metrics_expiration: 5m
+        metrics_flush_interval: 30s
+        namespace: ""
+      spanmetrics/team_b:
+        add_resource_attributes: true
+        aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+        aggregation_cardinality_limit: 100000
+        dimensions:
+          - name: http.method
+          - name: cgx.transaction
+          - name: cgx.transaction.root
+          - name: status_code
+          - name: db.namespace
+          - name: db.operation.name
+          - name: db.collection.name
+          - name: db.system
+          - name: http.response.status_code
+          - name: rpc.grpc.status_code
+          - name: service.version
+        histogram:
+          unit: ms
+          explicit:
+            buckets: [1ms, 4ms, 10ms, 20ms, 50ms, 100ms, 200ms, 500ms, 1s, 2s, 5s]
+        metrics_expiration: 5m
+        metrics_flush_interval: 30s
+        namespace: ""
+
+    processors:
+      # Helm `k8sResourceAttributes` (gateway): full K8s metadata for Infrastructure ↔ APM correlation.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          otel_annotations: true
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.replicaset.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.job.name
+            - k8s.cronjob.name
+            - k8s.container.name
+            - container.id
+            - service.name
+            - service.namespace
+            - service.version
+          labels:
+            - tag_name: k8s.label.name
+              key: app.kubernetes.io/name
+              from: pod
+            - tag_name: k8s.label.instance
+              key: app.kubernetes.io/instance
+              from: pod
+            - tag_name: k8s.label.component
+              key: app.kubernetes.io/component
+              from: pod
+          annotations:
+            - tag_name: k8s.annotation.coralogix_service
+              key: app.coralogix.com/service
+              from: pod
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: container.id
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: connection
+
+      # Link APM resources to node host facet (Helm uses host.id from hostEntityEvents for catalog join).
+      resource/host_from_k8s:
+        attributes:
+          - key: host.name
+            action: upsert
+            from_attribute: k8s.node.name
+          - key: k8s.cluster.name
+            action: upsert
+            value: ai-agent-sim-cluster
+
+      resource/metadata:
+        attributes:
+          - key: cx.otel_integration.name
+            action: upsert
+            value: svelte-chatbot-ai-agent-sim
+          - key: k8s.cluster.name
+            action: upsert
+            value: ai-agent-sim-cluster
+
+      transform/entity-event:
+        error_mode: silent
+        log_statements:
+          - context: log
+            statements:
+              - set(attributes["otel.entity.id"]["host.id"], resource.attributes["host.id"])
+              - merge_maps(attributes, resource.attributes, "insert")
+          - context: resource
+            statements:
+              - keep_keys(attributes, [""])
+
+      k8sattributes/profiles:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.replicaset.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.deployment.name
+            - k8s.cronjob.name
+            - k8s.job.name
+            - k8s.pod.name
+            - k8s.node.name
+            - container.id
+            - k8s.container.name
+            - service.version
+          labels:
+            - tag_name: k8s.label.name
+              key: app.kubernetes.io/name
+              from: pod
+            - tag_name: k8s.label.instance
+              key: app.kubernetes.io/instance
+              from: pod
+            - tag_name: k8s.label.component
+              key: app.kubernetes.io/component
+              from: pod
+          annotations:
+            - tag_name: k8s.annotation.coralogix_service
+              key: app.coralogix.com/service
+              from: pod
+          otel_annotations: true
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: container.id
+          - sources:
+              - from: connection
+
+      transform/profiles:
+        error_mode: silent
+        profile_statements:
+          # Coralogix profilesCollection — service.name (OTel K8s semconv); override eBPF executable paths.
+          - set(resource.attributes["service.name"], resource.attributes["k8s.annotation.coralogix_service"]) where resource.attributes["k8s.annotation.coralogix_service"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.label.instance"]) where resource.attributes["k8s.label.instance"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.label.name"]) where resource.attributes["k8s.label.name"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.deployment.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.deployment.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.replicaset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.replicaset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.statefulset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.statefulset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.daemonset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.daemonset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.cronjob.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.cronjob.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.job.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.job.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.pod.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.pod.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.container.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.container.name"] != nil
+          # Align cx.* with APM (backend/main.py); never copy executable paths into cx.application.name.
+          - set(resource.attributes["cx.application.name"], resource.attributes["k8s.label.name"]) where resource.attributes["k8s.label.name"] != nil
+          - set(resource.attributes["cx.subsystem.name"], resource.attributes["k8s.label.component"]) where resource.attributes["k8s.label.component"] != nil
+          - set(resource.attributes["cx.application.name"], resource.attributes["service.name"]) where resource.attributes["cx.application.name"] == nil and resource.attributes["service.name"] != nil and not IsMatch(resource.attributes["service.name"], "^/.*/")
+          - set(resource.attributes["cx.subsystem.name"], "chat-api") where resource.attributes["cx.subsystem.name"] == nil and resource.attributes["k8s.container.name"] == "api"
+          - set(resource.attributes["cx.subsystem.name"], "chat-web") where resource.attributes["cx.subsystem.name"] == nil and resource.attributes["k8s.container.name"] == "web"
+
+      transform/compact:
+        trace_statements:
+          - context: resource
+            statements:
+              - keep_keys(attributes, ["service.name", "cx.application.name", "cx.subsystem.name", "k8s.cluster.name", "host.name", "deployment.environment.name"])
+
+      transform/spanmetrics:
+        error_mode: silent
+        metric_statements:
+          - context: datapoint
+            statements:
+              - 'set(datapoint.attributes["status.code"], "STATUS_CODE_ERROR") where datapoint.attributes["status.code"] == nil and instrumentation_scope.name == "spanmetricsconnector" and datapoint.attributes["otel.status_code"] == "ERROR"'
+              - 'set(datapoint.attributes["status.code"], "STATUS_CODE_OK") where datapoint.attributes["status.code"] == nil and instrumentation_scope.name == "spanmetricsconnector" and datapoint.attributes["otel.status_code"] == "OK"'
+              - 'set(datapoint.attributes["status.code"], "STATUS_CODE_UNSET") where datapoint.attributes["status.code"] == nil and instrumentation_scope.name == "spanmetricsconnector" and (datapoint.attributes["otel.status_code"] == "UNSET" or datapoint.attributes["otel.status_code"] == nil)'
+
+      batch:
+        timeout: 2s
+        send_batch_size: 1024
+
+      # Stable rollups / environment facet (matches spans2metrics label patterns like tags_environment).
+      resource/deployment_meta:
+        attributes:
+          - key: deployment.environment.name
+            action: upsert
+            value: ai-agent-sim
+          - key: k8s.cluster.name
+            action: upsert
+            value: ai-agent-sim-cluster
+
+      groupbytrace/team_a:
+        wait_duration: 5s
+        num_traces: 1000
+      coralogix/team_a:
+        transactions:
+          enabled: true
+
+      groupbytrace/team_b:
+        wait_duration: 5s
+        num_traces: 1000
+      coralogix/team_b:
+        transactions:
+          enabled: true
+
+    exporters:
+      # Resource Catalog (Helm `coralogix/resource_catalog` + metadata-as-otlp-logs/v1). Requires coralogix exporter in contrib.
+      coralogix/resource_catalog_a:
+        domain: ${env:CORALOGIX_DOMAIN_TEAM_A}
+        private_key: ${env:CORALOGIX_OTEL_KEY_TEAM_A}
+        application_name: resource
+        subsystem_name: catalog
+        timeout: 30s
+        logs:
+          headers:
+            X-Coralogix-Distribution: svelte-chatbot-kustomize/1.0
+            x-coralogix-ingress: metadata-as-otlp-logs/v1
+      coralogix/resource_catalog_b:
+        domain: ${env:CORALOGIX_DOMAIN_TEAM_B}
+        private_key: ${env:CORALOGIX_OTEL_KEY_TEAM_B}
+        application_name: resource
+        subsystem_name: catalog
+        timeout: 30s
+        logs:
+          headers:
+            X-Coralogix-Distribution: svelte-chatbot-kustomize/1.0
+            x-coralogix-ingress: metadata-as-otlp-logs/v1
+
+      # Coralogix egress: IPv4 literal + TLS SNI (server_name_override) — EKS nodes here have no IPv6 path;
+      # gRPC otherwise dials AAAA first → "network is unreachable". Update CORALOGIX_INGRESS_ENDPOINT_* on ELB rotation.
+      otlp/cx_a:
+        endpoint: ${env:CORALOGIX_INGRESS_ENDPOINT_TEAM_A}
+        tls:
+          insecure: false
+          server_name_override: ${env:CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_A}
+        compression: gzip
+        headers:
+          Authorization: Bearer ${env:CORALOGIX_OTEL_KEY_TEAM_A}
+      otlp/cx_b:
+        endpoint: ${env:CORALOGIX_INGRESS_ENDPOINT_TEAM_B}
+        tls:
+          insecure: false
+          server_name_override: ${env:CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_B}
+        compression: gzip
+        headers:
+          Authorization: Bearer ${env:CORALOGIX_OTEL_KEY_TEAM_B}
+      # Profiles: ingress host MUST match TEAM_* Send-Your-Data key region (cx_a=US2, cx_b=EU1).
+      # Profiles: do NOT set CX-Application-Name / CX-Subsystem-Name headers here — they override
+      # resource attrs and hide chat workloads under "otel"/"integration". Use transform/profiles instead.
+      otlp/cx_a_profiles:
+        endpoint: ${env:CORALOGIX_INGRESS_ENDPOINT_TEAM_A}
+        tls:
+          insecure: false
+          server_name_override: ${env:CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_A}
+        compression: gzip
+        headers:
+          Authorization: Bearer ${env:CORALOGIX_OTEL_KEY_TEAM_A}
+      otlp/cx_b_profiles:
+        endpoint: ${env:CORALOGIX_INGRESS_ENDPOINT_TEAM_B}
+        tls:
+          insecure: false
+          server_name_override: ${env:CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_B}
+        compression: gzip
+        headers:
+          Authorization: Bearer ${env:CORALOGIX_OTEL_KEY_TEAM_B}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13134
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        metrics:
+          level: detailed
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+      pipelines:
+        traces/team_a:
+          receivers: [otlp/team_a]
+          processors:
+            [
+              k8sattributes,
+              resource/host_from_k8s,
+              resource/deployment_meta,
+              groupbytrace/team_a,
+              coralogix/team_a,
+              batch,
+            ]
+          exporters: [otlp/cx_a, forward/sm_a]
+        traces/team_b:
+          receivers: [otlp/team_b]
+          processors:
+            [
+              k8sattributes,
+              resource/host_from_k8s,
+              resource/deployment_meta,
+              groupbytrace/team_b,
+              coralogix/team_b,
+              batch,
+            ]
+          exporters: [otlp/cx_b, forward/sm_b]
+        traces/team_a_sm:
+          receivers: [forward/sm_a]
+          processors: [transform/compact, batch]
+          exporters: [spanmetrics/team_a]
+        traces/team_b_sm:
+          receivers: [forward/sm_b]
+          processors: [transform/compact, batch]
+          exporters: [spanmetrics/team_b]
+        logs/team_a:
+          receivers: [otlp/team_a]
+          processors: [k8sattributes, resource/host_from_k8s, resource/deployment_meta, batch]
+          exporters: [otlp/cx_a]
+        logs/team_b:
+          receivers: [otlp/team_b]
+          processors: [k8sattributes, resource/host_from_k8s, resource/deployment_meta, batch]
+          exporters: [otlp/cx_b]
+        logs/resource_catalog_a:
+          receivers: [k8sobjects]
+          processors: [resource/metadata, batch]
+          exporters: [coralogix/resource_catalog_a]
+        logs/resource_catalog_b:
+          receivers: [k8sobjects]
+          processors: [resource/metadata, batch]
+          exporters: [coralogix/resource_catalog_b]
+        metrics/team_a:
+          receivers: [otlp/team_a, spanmetrics/team_a]
+          processors: [resource/deployment_meta, transform/spanmetrics, batch]
+          exporters: [otlp/cx_a]
+        metrics/team_b:
+          receivers: [otlp/team_b, spanmetrics/team_b]
+          processors: [resource/deployment_meta, transform/spanmetrics, batch]
+          exporters: [otlp/cx_b]
+        profiles/team_a:
+          receivers: [otlp/team_a]
+          processors: [k8sattributes/profiles, transform/profiles]
+          exporters: [otlp/cx_a_profiles]
+        profiles/team_b:
+          receivers: [otlp/team_b]
+          processors: [k8sattributes/profiles, transform/profiles]
+          exporters: [otlp/cx_b_profiles]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector-chatbot
+  namespace: ai-agent-sim
+  labels:
+    app: otel-collector-chatbot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector-chatbot-k8smeta
+  labels:
+    app: otel-collector-chatbot
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources: [replicasets, deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-chatbot-k8smeta
+  labels:
+    app: otel-collector-chatbot
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector-chatbot-k8smeta
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector-chatbot
+    namespace: ai-agent-sim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector-chatbot
+  namespace: ai-agent-sim
+  labels:
+    app: otel-collector-chatbot
+spec:
+  selector:
+    app: otel-collector-chatbot
+  ports:
+    - name: otlp-grpc-a
+      port: 34317
+      targetPort: 34317
+    - name: otlp-http-a
+      port: 34318
+      targetPort: 34318
+    - name: otlp-grpc-b
+      port: 34327
+      targetPort: 34327
+    - name: otlp-http-b
+      port: 34328
+      targetPort: 34328
+    - name: health
+      port: 13134
+      targetPort: 13134
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector-chatbot
+  namespace: ai-agent-sim
+  labels:
+    app: otel-collector-chatbot
+spec:
+  replicas: 1
+  # Keep OTLP receivers up during rollout so eBPF profiler (profiles export) avoids connection refused bursts.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: otel-collector-chatbot
+  template:
+    metadata:
+      labels:
+        app: otel-collector-chatbot
+    spec:
+      serviceAccountName: otel-collector-chatbot
+      containers:
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:0.151.0
+          args:
+            - --config=/etc/otelcol/config.yaml
+            - --feature-gates=+service.profilesSupport,+connector.spanmetrics.legacyMetricNames
+          ports:
+            - containerPort: 34317
+              name: otlp-grpc-a
+            - containerPort: 34318
+              name: otlp-http-a
+            - containerPort: 34327
+              name: otlp-grpc-b
+            - containerPort: 34328
+              name: otlp-http-b
+            - containerPort: 13134
+              name: health
+            - containerPort: 8888
+              name: metrics
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+          env:
+            - name: CORALOGIX_OTEL_KEY_TEAM_A
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: coralogix-otel-key-team-a
+            - name: CORALOGIX_OTEL_KEY_TEAM_B
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: coralogix-otel-key-team-b
+            # IPv4 + SNI for ingress.us2 / ingress.eu1 (see exporters comment above).
+            - name: CORALOGIX_INGRESS_ENDPOINT_TEAM_A
+              value: "18.98.18.193:443"
+            - name: CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_A
+              value: ingress.us2.coralogix.com
+            - name: CORALOGIX_INGRESS_ENDPOINT_TEAM_B
+              value: "18.97.198.72:443"
+            - name: CORALOGIX_INGRESS_TLS_SERVER_NAME_TEAM_B
+              value: ingress.eu1.coralogix.com
+            # Coralogix exporter `domain` (not OTLP ingress host) for resource catalog pipelines.
+            - name: CORALOGIX_DOMAIN_TEAM_A
+              value: cx498.coralogix.com
+            - name: CORALOGIX_DOMAIN_TEAM_B
+              value: eu1.coralogix.com
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13134
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13134
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-chatbot-config

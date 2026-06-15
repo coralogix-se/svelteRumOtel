@@ -1,0 +1,198 @@
+# Per-node agent for Infrastructure Explorer correlation (Helm `hostEntityEvents` + `hostMetrics` presets).
+# Emits host entity metadata (host.id, host.ip, …) to Resource Catalog via metadata-as-otlp-logs/v1.
+# Joins with APM traces enriched by `k8sattributes` + resource/host_from_k8s on otel-collector-chatbot.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-infra-agent-config
+  namespace: ai-agent-sim
+  labels:
+    app: otel-infra-agent
+data:
+  config.yaml: |
+    receivers:
+      hostmetrics:
+        collection_interval: 30s
+        root_path: /hostfs
+        scrapers:
+          cpu:
+            metrics:
+              system.cpu.utilization:
+                enabled: true
+          memory:
+            metrics:
+              system.memory.utilization:
+                enabled: true
+          filesystem:
+            exclude_mount_points:
+              match_type: regexp
+              mount_points:
+                - /dev/.*
+                - /proc/.*
+                - /sys/.*
+                - /var/lib/kubelet/.*
+                - /var/lib/docker/.*
+          load: {}
+          network: {}
+
+    processors:
+      resourcedetection/entity:
+        detectors: [system, env]
+        override: false
+        timeout: 2s
+        system:
+          resource_attributes:
+            host.id:
+              enabled: true
+            host.ip:
+              enabled: true
+            host.name:
+              enabled: true
+            host.cpu.cache.l2.size:
+              enabled: true
+            host.cpu.model.name:
+              enabled: true
+            os.description:
+              enabled: true
+
+      resource/metadata:
+        attributes:
+          - key: cx.otel_integration.name
+            action: upsert
+            value: svelte-chatbot-ai-agent-sim
+          - key: k8s.cluster.name
+            action: upsert
+            value: ai-agent-sim-cluster
+
+      transform/entity-event:
+        error_mode: silent
+        log_statements:
+          - context: log
+            statements:
+              - set(attributes["otel.entity.id"]["host.id"], resource.attributes["host.id"])
+              - merge_maps(attributes, resource.attributes, "insert")
+          - context: resource
+            statements:
+              - keep_keys(attributes, [""])
+
+      batch:
+        timeout: 2s
+        send_batch_size: 512
+
+    exporters:
+      coralogix/resource_catalog_a:
+        domain: ${env:CORALOGIX_DOMAIN_TEAM_A}
+        private_key: ${env:CORALOGIX_OTEL_KEY_TEAM_A}
+        application_name: resource
+        subsystem_name: catalog
+        timeout: 30s
+        logs:
+          headers:
+            X-Coralogix-Distribution: svelte-chatbot-kustomize/1.0
+            x-coralogix-ingress: metadata-as-otlp-logs/v1
+      coralogix/resource_catalog_b:
+        domain: ${env:CORALOGIX_DOMAIN_TEAM_B}
+        private_key: ${env:CORALOGIX_OTEL_KEY_TEAM_B}
+        application_name: resource
+        subsystem_name: catalog
+        timeout: 30s
+        logs:
+          headers:
+            X-Coralogix-Distribution: svelte-chatbot-kustomize/1.0
+            x-coralogix-ingress: metadata-as-otlp-logs/v1
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13135
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        logs/resource_catalog_a:
+          receivers: [hostmetrics]
+          processors:
+            [resourcedetection/entity, resource/metadata, transform/entity-event, batch]
+          exporters: [coralogix/resource_catalog_a]
+        logs/resource_catalog_b:
+          receivers: [hostmetrics]
+          processors:
+            [resourcedetection/entity, resource/metadata, transform/entity-event, batch]
+          exporters: [coralogix/resource_catalog_b]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-infra-agent
+  namespace: ai-agent-sim
+  labels:
+    app: otel-infra-agent
+spec:
+  selector:
+    matchLabels:
+      app: otel-infra-agent
+  template:
+    metadata:
+      labels:
+        app: otel-infra-agent
+    spec:
+      serviceAccountName: otel-collector-chatbot
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:0.151.0
+          args:
+            - --config=/etc/otelcol/config.yaml
+          ports:
+            - containerPort: 13135
+              name: health
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CORALOGIX_OTEL_KEY_TEAM_A
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: coralogix-otel-key-team-a
+            - name: CORALOGIX_OTEL_KEY_TEAM_B
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: coralogix-otel-key-team-b
+            - name: CORALOGIX_DOMAIN_TEAM_A
+              value: cx498.coralogix.com
+            - name: CORALOGIX_DOMAIN_TEAM_B
+              value: eu1.coralogix.com
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+            - name: hostfs
+              mountPath: /hostfs
+              readOnly: true
+              mountPropagation: HostToContainer
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13135
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 384Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-infra-agent-config
+        - name: hostfs
+          hostPath:
+            path: /
+            type: Directory

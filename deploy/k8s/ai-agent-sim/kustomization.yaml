@@ -1,0 +1,35 @@
+# Usage:
+#   cp secret-generator.env.example secret-generator.env   # set keys (gitignored)
+#   kubectl apply -k deploy/k8s/ai-agent-sim/
+#
+# Dual-team layout: in-namespace `otel-collector-chatbot` — OTLP **34317** (Team A / US2) and **34327** (Team B / EU1).
+# Frontends: **LoadBalancer** (internet-facing NLB, port 80) — URLs in `.logs/eks-frontend-public-urls.log` after deploy;
+# plus **CronJob** `frontend-public-url-logger` logs URLs every 5m (see `frontend-public-url-logger.yaml`).
+# Container images are full ECR URIs in chat-team-*.yaml (not kustomize `images:`).
+#
+# eBPF profiler (`otel-ebpf-profiler.yaml`): one privileged pod per node — needs pod budget / capacity. If
+# scheduling fails, remove temporarily: kubectl delete -f deploy/k8s/ai-agent-sim/otel-ebpf-profiler.yaml
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ai-agent-sim
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: svelte-chatbot-app
+    envs:
+      - secret-generator.env
+
+resources:
+  - namespace.yaml
+  - otel-collector.yaml
+  - otel-infra-agent.yaml
+  - otel-ebpf-profiler.yaml
+  - chat-team-a.yaml
+  - chat-team-b.yaml
+  - ingress.yaml
+  - frontend-public-url-logger.yaml
+  - rum-harness-dual.yaml

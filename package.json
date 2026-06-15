@@ -1,0 +1,50 @@
+{
+	"name": "svelterum",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "node --require ./instrumentation.cjs build",
+		"start": "node --require ./instrumentation.cjs build",
+		"test:rum": "node --env-file=.env tests/rum-harness.mjs",
+		"test:rum:both": "node tests/run-rum-both.mjs",
+		"test:rum:loop": "node tests/rum-harness-loop.mjs",
+		"demo:start": "bash scripts/demo-start.sh",
+		"demo:stop": "bash scripts/demo-start.sh stop",
+		"demo:restart": "bash scripts/demo-start.sh restart",
+		"deploy:eks": "bash scripts/deploy-eks-ai-agent-sim.sh",
+		"deploy:eks:backend": "bash scripts/deploy-eks-ai-agent-sim.sh backend",
+		"deploy:eks:frontend": "bash scripts/deploy-eks-ai-agent-sim.sh frontend",
+		"deploy:eks:harness": "bash scripts/deploy-eks-ai-agent-sim.sh harness",
+		"api": "cd backend && .venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+	},
+	"dependencies": {
+		"@coralogix/browser": "^3.10.0",
+		"@coralogix/opentelemetry": "^0.1.3",
+		"@google/genai": "^1.46.0",
+		"@opentelemetry/api": "^1.9.0",
+		"@opentelemetry/auto-instrumentations-node": "^0.71.0",
+		"@opentelemetry/exporter-trace-otlp-proto": "^0.213.0",
+		"@opentelemetry/instrumentation-fetch": "^0.213.0",
+		"@opentelemetry/instrumentation-http": "^0.213.0",
+		"@opentelemetry/sdk-node": "^0.213.0",
+		"dotenv": "^17.3.1",
+		"highlight.js": "^11.11.1"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/adapter-node": "^5.5.4",
+		"@sveltejs/kit": "^2.50.2",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"puppeteer": "^24.40.0",
+		"svelte": "^5.51.0",
+		"svelte-check": "^4.4.2",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1"
+	}
+}

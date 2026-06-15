@@ -1,0 +1,26 @@
+:root {
+	--bg-dark: #0f0f12;
+	--bg-card: #18181c;
+	--accent: #6366f1;
+	--accent-dim: #4f46e5;
+	--text: #e4e4e7;
+	--text-muted: #a1a1aa;
+	--border: #27272a;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+	background: var(--bg-dark);
+	color: var(--text);
+	overflow: hidden;
+}

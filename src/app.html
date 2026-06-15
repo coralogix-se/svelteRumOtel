@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<!--
+			Plain HTTP (e.g. in-cluster harness, Ingress without TLS): Web Crypto has no randomUUID
+			(without secure context); polyfill before any bundles so Coralogix RUM + app code stay safe.
+		-->
+		<script>
+			(function () {
+				try {
+					var c = typeof globalThis !== 'undefined' && globalThis.crypto;
+					if (!c || typeof c.getRandomValues !== 'function') return;
+					if (typeof c.randomUUID === 'function') return;
+					function randomUUID() {
+						var buf = new Uint8Array(16);
+						c.getRandomValues(buf);
+						buf[6] = (buf[6] & 0x0f) | 0x40;
+						buf[8] = (buf[8] & 0x3f) | 0x80;
+						var hex = '';
+						for (var i = 0; i < 16; i++) hex += buf[i].toString(16).padStart(2, '0');
+						return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+					}
+					try {
+						c.randomUUID = randomUUID;
+					} catch (_) {
+						Object.defineProperty(c, 'randomUUID', {
+							value: randomUUID,
+							configurable: true,
+							writable: true,
+							enumerable: false,
+						});
+					}
+				} catch (_) {
+					/* noop */
+				}
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

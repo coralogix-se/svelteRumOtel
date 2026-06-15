@@ -1,0 +1,30 @@
+# Puppeteer RUM harness for EKS — hits in-cluster frontends (CHAT_API_ORIGIN proxy in hooks.server.ts).
+# EKS runs linux/amd64: from Apple Silicon use buildx — e.g.
+#   docker buildx build --platform linux/amd64 -f deploy/docker/Dockerfile.harness -t $REGISTRY/svelte-chatbot-rum-harness:latest . --push
+FROM node:22-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	chromium \
+	fonts-liberation \
+	ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
+	PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+# puppeteer lives in devDependencies — do not set NODE_ENV=production before npm ci
+RUN npm ci
+
+ENV NODE_ENV=production
+
+COPY tests/rum-harness.mjs tests/run-rum-both.mjs tests/rum-harness-loop.mjs tests/rum-user-context.mjs ./tests/
+
+# In-cluster defaults (override in Deployment). Frontend Services use port 80 → pod :3000.
+ENV BASE_URL_TEAM_A=http://chat-frontend-team-a.ai-agent-sim.svc.cluster.local \
+	BASE_URL_TEAM_B=http://chat-frontend-team-b.ai-agent-sim.svc.cluster.local
+
+# Continuous loop: rum-harness-loop calls run-rum-both when both team URLs are set
+CMD ["node", "tests/rum-harness-loop.mjs"]

@@ -1,0 +1,226 @@
+# Bundled via kustomization (deploy/k8s/ai-agent-sim/kustomization.yaml). One privileged pod per Linux node —
+# omit from `resources:` if cluster pod limits prevent scheduling.
+# This is separate from contrib `otel/opentelemetry-collector-contrib`; it bundles the profiling receiver only.
+#
+# Duplicate fan-out — same profile payloads to both tenant pipelines:
+#   Team A → `dns:///otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34317` (US2 / `otlp/cx_a`).
+#   Team B → `dns:///otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34327` (EU1 / `otlp/cx_b`).
+# Cost: profiling volume is billed/stored twice; use only if both tenants need identical node-wide profiles.
+#
+# `k8sattributes/profiles` + `transform/profiles` mirror Coralogix otel-integration presets
+# `profilesK8sAttributes` (see opentelemetry-collector chart _config.tpl). Central collector runs the same
+# enrichment again (`profilesCollection`) before Coralogix export.
+#
+# OTLP endpoints use **`dns:///…` grpc scheme** so the client re-resolves the Service **after collector rollouts**.
+
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-ebpf-profiler-config
+  namespace: ai-agent-sim
+  labels:
+    app: otel-ebpf-profiler
+data:
+  config.yaml: |
+    receivers:
+      profiling:
+        samples_per_second: 20
+
+    processors:
+      k8sattributes/profiles:
+        auth_type: serviceAccount
+        passthrough: false
+        filter:
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.replicaset.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.deployment.name
+            - k8s.cronjob.name
+            - k8s.job.name
+            - k8s.pod.name
+            - k8s.node.name
+            - container.id
+            - k8s.container.name
+            - service.version
+          labels:
+            - tag_name: k8s.label.name
+              key: app.kubernetes.io/name
+              from: pod
+            - tag_name: k8s.label.instance
+              key: app.kubernetes.io/instance
+              from: pod
+            - tag_name: k8s.label.component
+              key: app.kubernetes.io/component
+              from: pod
+          annotations:
+            - tag_name: k8s.annotation.coralogix_service
+              key: app.coralogix.com/service
+              from: pod
+          otel_annotations: true
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: container.id
+          - sources:
+              - from: connection
+
+      transform/profiles:
+        error_mode: silent
+        profile_statements:
+          # Coralogix profilesK8sAttributes — OTel K8s service.name priority; also override eBPF executable paths.
+          - set(resource.attributes["service.name"], resource.attributes["k8s.annotation.coralogix_service"]) where resource.attributes["k8s.annotation.coralogix_service"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.label.instance"]) where resource.attributes["k8s.label.instance"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.label.name"]) where resource.attributes["k8s.label.name"] != nil and (resource.attributes["service.name"] == nil or IsMatch(resource.attributes["service.name"], "^/.*/"))
+          - set(resource.attributes["service.name"], resource.attributes["k8s.deployment.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.deployment.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.replicaset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.replicaset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.statefulset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.statefulset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.daemonset.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.daemonset.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.cronjob.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.cronjob.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.job.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.job.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.pod.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.pod.name"] != nil
+          - set(resource.attributes["service.name"], resource.attributes["k8s.container.name"]) where resource.attributes["service.name"] == nil and resource.attributes["k8s.container.name"] != nil
+
+    exporters:
+      otlp/team_a:
+        endpoint: dns:///otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34317
+        tls:
+          insecure: true
+        compression: gzip
+      otlp/team_b:
+        endpoint: dns:///otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34327
+        tls:
+          insecure: true
+        compression: gzip
+
+    extensions:
+      health_check:
+        endpoint: 127.0.0.1:13134
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        profiles:
+          receivers: [profiling]
+          processors: [k8sattributes/profiles, transform/profiles]
+          exporters: [otlp/team_a, otlp/team_b]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-ebpf-profiler
+  namespace: ai-agent-sim
+  labels:
+    app: otel-ebpf-profiler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-ebpf-profiler-ai-agent-sim
+  labels:
+    app: otel-ebpf-profiler
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources: [replicasets, deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-ebpf-profiler-ai-agent-sim
+  labels:
+    app: otel-ebpf-profiler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-ebpf-profiler-ai-agent-sim
+subjects:
+  - kind: ServiceAccount
+    name: otel-ebpf-profiler
+    namespace: ai-agent-sim
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-ebpf-profiler
+  namespace: ai-agent-sim
+  labels:
+    app: otel-ebpf-profiler
+spec:
+  selector:
+    matchLabels:
+      app: otel-ebpf-profiler
+  template:
+    metadata:
+      labels:
+        app: otel-ebpf-profiler
+    spec:
+      hostPID: true
+      serviceAccountName: otel-ebpf-profiler
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: profiler
+          image: otel/opentelemetry-collector-ebpf-profiler:0.151.0
+          args:
+            - --config=/etc/otel/config.yaml
+            - --feature-gates=+service.profilesSupport
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: host.name=$(K8S_NODE_NAME)
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: sys-kernel
+              mountPath: /sys/kernel
+              readOnly: true
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-ebpf-profiler-config
+        - name: sys-kernel
+          hostPath:
+            path: /sys/kernel
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: proc
+          hostPath:
+            path: /proc

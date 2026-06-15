@@ -1,0 +1,190 @@
+# Team A: OTLP/gRPC to in-namespace collector :34317 → US2 (`otlp/cx_a` in otel-collector.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-backend-team-a
+  namespace: ai-agent-sim
+  labels:
+    app: chat-backend-team-a
+spec:
+  selector:
+    app: chat-backend-team-a
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-backend-team-a
+  namespace: ai-agent-sim
+  labels:
+    app: chat-backend-team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-backend-team-a
+  template:
+    metadata:
+      labels:
+        app: chat-backend-team-a
+        app.kubernetes.io/name: svelte-chatbot
+        app.kubernetes.io/component: chat-api
+      annotations:
+        resource.opentelemetry.io/service.name: svelte-chatbot
+        app.coralogix.com/service: svelte-chatbot
+    spec:
+      containers:
+        - name: api
+          image: 827602716714.dkr.ecr.us-west-2.amazonaws.com/svelte-chatbot-backend:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34317
+            - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+              value: http://otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34317
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.pod.name=$(K8S_POD_NAME),k8s.namespace.name=ai-agent-sim,k8s.node.name=$(K8S_NODE_NAME),k8s.deployment.name=chat-backend-team-a,k8s.container.name=api,deployment.environment.name=ai-agent-sim,k8s.cluster.name=ai-agent-sim-cluster"
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: gemini-api-key
+            # US2 Guardrails key optional; CX_GUARDRAILS_ENDPOINT omitted → backend defaults to api.us2.
+            - name: CORALOGIX_GUARDRAILS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: coralogix-guardrails-key
+                  optional: true
+            - name: GUARDRAILS_ENABLED
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-frontend-team-a
+  namespace: ai-agent-sim
+  labels:
+    app: chat-frontend-team-a
+  annotations:
+    # EKS: internet-facing NLB — public http://<hostname>/ (port 80 → pod :3000). IAM: ELB + EC2 for workers.
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+spec:
+  type: LoadBalancer
+  selector:
+    app: chat-frontend-team-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-frontend-team-a
+  namespace: ai-agent-sim
+  labels:
+    app: chat-frontend-team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-frontend-team-a
+  template:
+    metadata:
+      labels:
+        app: chat-frontend-team-a
+        app.kubernetes.io/name: svelte-chatbot
+        app.kubernetes.io/component: chat-web
+      annotations:
+        resource.opentelemetry.io/service.name: svelte-chatbot
+        app.coralogix.com/service: svelte-chatbot
+    spec:
+      containers:
+        - name: web
+          image: 827602716714.dkr.ecr.us-west-2.amazonaws.com/svelte-chatbot-frontend:latest
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PUBLIC_CORALOGIX_RUM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: svelte-chatbot-app
+                  key: rum-public-key-team-a
+            - name: PUBLIC_CORALOGIX_DOMAIN
+              value: US2
+            - name: PUBLIC_RUM_PERSONA
+              value: vega
+            - name: PUBLIC_RUM_USER_ID
+              value: vega-k7
+            - name: PUBLIC_RUM_USER_NAME
+              value: Vega
+            - name: PUBLIC_CHAT_PAGE_TITLE
+              value: "Chat Bot ob-dev US2"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector-chatbot.ai-agent-sim.svc.cluster.local:34317
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+            - name: CHAT_API_ORIGIN
+              value: http://chat-backend-team-a:8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 60
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
