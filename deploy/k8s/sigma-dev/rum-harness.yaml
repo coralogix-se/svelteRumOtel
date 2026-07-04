@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rum-harness
+  labels:
+    app: rum-harness
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: rum-harness
+  template:
+    metadata:
+      labels:
+        app: rum-harness
+    spec:
+      containers:
+        - name: harness
+          image: 827602716714.dkr.ecr.us-west-2.amazonaws.com/svelte-chatbot-rum-harness:latest
+          imagePullPolicy: Always
+          env:
+            # Image defaults target ai-agent-sim dual-stack; clear so loop uses BASE_URL + rum-harness.mjs.
+            - name: BASE_URL_TEAM_A
+              value: ""
+            - name: BASE_URL_TEAM_B
+              value: ""
+            - name: RUM_HARNESS_URL_A
+              value: ""
+            - name: RUM_HARNESS_URL_B
+              value: ""
+            - name: BASE_URL
+              value: http://chat-frontend
+            - name: RUM_HARNESS_CHAT_TIMEOUT_MS
+              value: "240000"
+            - name: RUM_HARNESS_NAV_TIMEOUT_MS
+              value: "120000"
+            - name: RUM_HARNESS_UI_READY_TIMEOUT_MS
+              value: "30000"
+            - name: RUM_HARNESS_DISABLE_DEV_SHM_USAGE
+              value: "0"
+            - name: RUM_HARNESS_WAIT_RUM_RECORDING
+              value: "1"
+            - name: RUM_HARNESS_RUM_RECORDING_TIMEOUT_MS
+              value: "30000"
+            - name: RUM_HARNESS_RUM_FLUSH_MS
+              value: "15000"
+            - name: RUM_HARNESS_MIN_SESSION_MS
+              value: "60000"
+            - name: RUM_HARNESS_POST_QUESTIONS_DWELL_MS
+              value: "10000"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test "$(ls -1 /proc 2>/dev/null | wc -l)" -lt 600
+            initialDelaySeconds: 180
+            periodSeconds: 120
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi

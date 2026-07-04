@@ -70,7 +70,7 @@ spec:
               command:
                 - sh
                 - -c
-                - test "$(ls -1 /proc 2>/dev/null | wc -l)" -lt 400
+                - test "$(ls -1 /proc 2>/dev/null | wc -l)" -lt 600
             initialDelaySeconds: 180
             periodSeconds: 120
             failureThreshold: 2

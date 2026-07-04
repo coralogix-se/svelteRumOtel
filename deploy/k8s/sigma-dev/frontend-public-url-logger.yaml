@@ -1,0 +1,229 @@
+# Resolves NLB URL for chat-frontend every 5m; prints to stdout and sends OTLP logs to otel-collector:4318.
+# View: kubectl logs -n svelte-rum-sigma -l app=frontend-public-url-logger --tail=50
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-public-url-logger-script
+  labels:
+    app: frontend-public-url-logger
+data:
+  send_public_urls.py: |
+    #!/usr/bin/env python3
+    """Resolve frontend Service; echo URL line; export OTLP log to in-namespace collector."""
+    from __future__ import annotations
+
+    import json
+    import os
+    import ssl
+    import time
+    import urllib.error
+    import urllib.request
+
+    NS = os.environ["POD_NAMESPACE"]
+    COLLECTOR = os.environ.get("OTEL_COLLECTOR_HOST", "otel-collector") + f".{NS}.svc.cluster.local"
+    OTLP_HTTP_PORT = int(os.environ.get("OTEL_OTLP_HTTP_PORT", "4318"))
+    FRONTEND_SVC = os.environ.get("FRONTEND_SERVICE", "chat-frontend")
+
+    API = "https://kubernetes.default.svc"
+    TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+
+    def read_token() -> str:
+        with open(TOKEN_PATH) as f:
+            return f.read().strip()
+
+
+    def k8s_get(path: str) -> dict:
+        ctx = ssl.create_default_context(cafile=CA_PATH)
+        req = urllib.request.Request(
+            API + path,
+            headers={"Authorization": "Bearer " + read_token()},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            return json.load(resp)
+
+
+    def lb_host(svc_name: str) -> str | None:
+        data = k8s_get(f"/api/v1/namespaces/{NS}/services/{svc_name}")
+        ing = (data.get("status") or {}).get("loadBalancer") or {}
+        ingress = ing.get("ingress") or []
+        if not ingress:
+            return None
+        h = (ingress[0].get("hostname") or ingress[0].get("ip") or "").strip()
+        return h or None
+
+
+    def log_line(host: str | None) -> str:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if host:
+            return f"{ts} frontend-public-url-logger cluster=SigmaDev url= http://{host}/"
+        return (
+            f"{ts} frontend-public-url-logger cluster=SigmaDev url= "
+            f"(pending — no hostname/ip on Service/{FRONTEND_SVC} yet)"
+        )
+
+
+    def otlp_logs_json(body_text: str) -> bytes:
+        nsec = str(int(time.time() * 1_000_000_000))
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {
+                                "key": "service.name",
+                                "value": {"stringValue": "frontend-public-url-logger"},
+                            },
+                            {
+                                "key": "cx.application.name",
+                                "value": {"stringValue": "svelte-chatbot"},
+                            },
+                            {
+                                "key": "cx.subsystem.name",
+                                "value": {"stringValue": "public-url-logger"},
+                            },
+                            {
+                                "key": "k8s.cluster.name",
+                                "value": {"stringValue": "SigmaDev"},
+                            },
+                            {
+                                "key": "deployment.environment.name",
+                                "value": {"stringValue": "svelte-rum-sigma"},
+                            },
+                        ]
+                    },
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": nsec,
+                                    "observedTimeUnixNano": nsec,
+                                    "severityText": "INFO",
+                                    "body": {"stringValue": body_text},
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        return json.dumps(payload).encode("utf-8")
+
+
+    def post_otlp_logs(body_text: str) -> None:
+        data = otlp_logs_json(body_text)
+        url = f"http://{COLLECTOR}:{OTLP_HTTP_PORT}/v1/logs"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+
+
+    def main() -> None:
+        host = lb_host(FRONTEND_SVC)
+        line = log_line(host)
+        print(line, flush=True)
+        post_otlp_logs(line)
+
+
+    if __name__ == "__main__":
+        try:
+            main()
+        except urllib.error.HTTPError as e:
+            print(f"HTTPError {e.code}: {e.read()!r}", flush=True)
+            raise
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend-public-url-logger
+  labels:
+    app: frontend-public-url-logger
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: frontend-public-url-logger
+  labels:
+    app: frontend-public-url-logger
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["chat-frontend"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frontend-public-url-logger
+  labels:
+    app: frontend-public-url-logger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: frontend-public-url-logger
+subjects:
+  - kind: ServiceAccount
+    name: frontend-public-url-logger
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: frontend-public-url-logger
+  labels:
+    app: frontend-public-url-logger
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 12
+  failedJobsHistoryLimit: 4
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 7200
+      template:
+        metadata:
+          labels:
+            app: frontend-public-url-logger
+        spec:
+          serviceAccountName: frontend-public-url-logger
+          restartPolicy: OnFailure
+          volumes:
+            - name: script
+              configMap:
+                name: frontend-public-url-logger-script
+                defaultMode: 0o500
+          containers:
+            - name: log-urls
+              image: docker.io/library/python:3.12-alpine
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: OTEL_COLLECTOR_HOST
+                  value: otel-collector
+                - name: OTEL_OTLP_HTTP_PORT
+                  value: "4318"
+                - name: FRONTEND_SERVICE
+                  value: chat-frontend
+              command:
+                - /usr/local/bin/python3
+                - /scripts/send_public_urls.py
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi

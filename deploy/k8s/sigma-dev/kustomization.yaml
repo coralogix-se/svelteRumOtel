@@ -1,0 +1,23 @@
+# SigmaDev cluster — single US2 stack (svelteRumOtel demo).
+#   cp secret-generator.env.example secret-generator.env   # set keys (gitignored)
+#   kubectl config use-context SigmaDev
+#   npm run deploy:eks:sigma-dev
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: svelte-rum-sigma
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: svelte-chatbot-app
+    envs:
+      - secret-generator.env
+
+resources:
+  - namespace.yaml
+  - otel-collector.yaml
+  - chat-stack.yaml
+  - rum-harness.yaml
+  - frontend-public-url-logger.yaml

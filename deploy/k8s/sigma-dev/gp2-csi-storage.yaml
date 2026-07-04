@@ -1,0 +1,52 @@
+# EBS CSI gp2 StorageClass + 2Gi demo PVC (SigmaDev).
+# Prerequisite: aws-ebs-csi-driver EKS addon + IRSA role SigmaDev-ebs-csi-driver.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp2-csi
+  labels:
+    app.kubernetes.io/name: svelte-rum-sigma
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp2
+  fsType: ext4
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gp2-csi-demo
+  namespace: svelte-rum-sigma
+  labels:
+    app: gp2-csi-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp2-csi
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Binds the PVC (WaitForFirstConsumer) and verifies mount; safe to delete after check.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gp2-csi-demo
+  namespace: svelte-rum-sigma
+  labels:
+    app: gp2-csi-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: hold
+      image: busybox:1.36
+      command: ["sh", "-c", "echo gp2-csi ok > /data/ok && sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: gp2-csi-demo

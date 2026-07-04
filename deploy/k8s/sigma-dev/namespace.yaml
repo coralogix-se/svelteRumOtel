@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: svelte-rum-sigma
+  labels:
+    app.kubernetes.io/name: svelte-rum-sigma
+    k8s.cluster.name: SigmaDev

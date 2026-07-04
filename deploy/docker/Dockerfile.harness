@@ -20,7 +20,7 @@ RUN npm ci
 
 ENV NODE_ENV=production
 
-COPY tests/rum-harness.mjs tests/run-rum-both.mjs tests/rum-harness-loop.mjs tests/rum-user-context.mjs ./tests/
+COPY tests/rum-harness.mjs tests/run-rum-both.mjs tests/rum-harness-loop.mjs tests/rum-harness-chrome-cleanup.mjs tests/rum-user-context.mjs ./tests/
 
 # In-cluster defaults (override in Deployment). Frontend Services use port 80 → pod :3000.
 ENV BASE_URL_TEAM_A=http://chat-frontend-team-a.ai-agent-sim.svc.cluster.local \

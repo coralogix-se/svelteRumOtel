@@ -12,6 +12,8 @@ declare global {
 	interface Window {
 		CoralogixRum?: {
 			isInited?: boolean;
+			startSessionRecording?(): void;
+			stopSessionRecording?(): void;
 			setUserContext(context: {
 				user_id: string;
 				user_name?: string;

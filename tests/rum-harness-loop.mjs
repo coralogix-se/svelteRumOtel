@@ -18,6 +18,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
+import { killHarnessChildProcesses } from './rum-harness-chrome-cleanup.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -33,13 +34,7 @@ function numEnv(name, fallback) {
 
 const INTERVAL_MS = numEnv('RUM_HARNESS_LOOP_INTERVAL_MS', 5 * 60 * 1000);
 
-/** Chromium orphans from failed Puppeteer launches accumulate under the loop PID in K8s. */
-function killOrphanedChromium() {
-	if (process.platform === 'win32') return;
-	spawnSync('pkill', ['-9', '-f', 'chromium'], { stdio: 'ignore' });
-}
-
-/** Log /proc count so EAGAIN / fork leaks show up in kubectl logs before hitting ~9k PIDs. */
+/** Log /proc count so EAGAIN / fork leaks show up in kubectl logs before liveness restart. */
 function logProcessBudget() {
 	if (process.platform === 'win32') return;
 	const procCount = spawnSync('sh', ['-c', 'ls -1 /proc 2>/dev/null | wc -l'], {
@@ -134,7 +129,7 @@ async function loop() {
       const failIso = new Date().toISOString();
       console.error(`[${failIso}] Harness failed:`, err.message);
     } finally {
-      killOrphanedChromium();
+      killHarnessChildProcesses();
       logProcessBudget();
     }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));

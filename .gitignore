@@ -17,6 +17,10 @@ Thumbs.db
 
 # K8s Gemini secret (copy from deploy/k8s/ai-agent-sim/secret-generator.env.example)
 deploy/k8s/ai-agent-sim/secret-generator.env
+deploy/k8s/sigma-dev/secret-generator.env
+
+# Local key registry (never commit)
+.logs/coralogix-keys-registry.local.md
 
 # Local archives / exports (may contain env snapshots)
 *.zip

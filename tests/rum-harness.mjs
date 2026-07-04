@@ -25,6 +25,7 @@
 import crypto from 'node:crypto';
 import puppeteer from 'puppeteer';
 import { applyHarnessRumUserContext } from './rum-user-context.mjs';
+import { disposePuppeteerBrowser } from './rum-harness-chrome-cleanup.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:5173';
 
@@ -172,6 +173,16 @@ async function waitForRumRecordingReady(page) {
 		`[rum-harness] waiting for RUM session recording (timeout ${RUM_RECORDING_TIMEOUT_MS}ms)`
 	);
 	const t0 = Date.now();
+
+	await page
+		.evaluate(async (timeoutMs) => {
+			const harness = window.__svelteRumHarness;
+			if (typeof harness?.waitForRumInit === 'function') {
+				await harness.waitForRumInit(timeoutMs);
+			}
+			window.CoralogixRum?.startSessionRecording?.();
+		}, RUM_RECORDING_TIMEOUT_MS)
+		.catch(() => {});
 
 	const fromNetwork = page
 		.waitForResponse(
@@ -456,7 +467,7 @@ function baseChromiumArgs() {
 		'--disable-gpu',
 		'--disable-software-rasterizer',
 		'--disable-extensions',
-		'--disable-background-networking',
+		// Do not use --disable-background-networking: session-recording workers fetch pako from CDN.
 		'--disable-background-timer-throttling',
 		'--disable-backgrounding-occluded-windows',
 		'--disable-breakpad',
@@ -508,7 +519,7 @@ async function main() {
 		console.error('RUM harness error:', msg);
 		exitCode = 1;
 	} finally {
-		await browser.close().catch(() => {});
+		await disposePuppeteerBrowser(browser);
 	}
 	process.exit(exitCode);
 }

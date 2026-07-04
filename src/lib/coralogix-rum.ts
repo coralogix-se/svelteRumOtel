@@ -27,6 +27,10 @@ export type RumUserContext = {
 /** Must match `@coralogix/browser` `CoralogixDomainsApiUrlMap` keys used in this app. */
 export type CoralogixRumDomain = 'US2' | 'EU1';
 
+/** Hosted worker bundles pako; inline blob workers rely on CDN importScripts (often blocked in headless). */
+const CORALOGIX_RUM_WORKER_URL =
+	'https://cdn.rum-ingress-coralogix.com/coralogix/browser/latest/worker.min.js';
+
 /** Set when SDK marks session_context.hasRecording on an outbound RUM event (harness poll). */
 let rumSessionHasRecording = false;
 let rumInitPromise: Promise<void> | null = null;
@@ -52,6 +56,7 @@ function enrichSessionContext(event: {
 		user_name?: string;
 		user_email?: string;
 		user_metadata?: Record<string, unknown>;
+		hasRecording?: boolean;
 	};
 }) {
 	if (!activeSdkUserContext || !event?.session_context) return;
@@ -64,11 +69,69 @@ function enrichSessionContext(event: {
 	if (!sc.user_metadata && activeSdkUserContext.user_metadata) {
 		sc.user_metadata = activeSdkUserContext.user_metadata;
 	}
+	if (rumSessionHasRecording) {
+		sc.hasRecording = true;
+	}
 }
 
 function markRumSessionRecording(event: { session_context?: { hasRecording?: boolean } }) {
 	if (event?.session_context?.hasRecording === true) {
 		rumSessionHasRecording = true;
+	}
+}
+
+/** SDK beforeSend receives a trimmed session_context (no hasRecording); detect uploads via fetch. */
+function installSessionRecordingFetchHook() {
+	if (typeof window === 'undefined') return;
+	const marker = '__svelteRumRecordingFetchHook';
+	if ((window as Window & { [key: string]: unknown })[marker]) return;
+	(window as Window & { [key: string]: unknown })[marker] = true;
+
+	const nativeFetch = window.fetch.bind(window);
+	window.fetch = async (...args: Parameters<typeof fetch>) => {
+		const response = await nativeFetch(...args);
+		try {
+			const input = args[0];
+			const url =
+				typeof input === 'string'
+					? input
+					: input instanceof Request
+						? input.url
+						: String(input);
+			if (url.includes('sessionrecording') && response.ok) {
+				noteRumSessionRecordingActive();
+			}
+		} catch {
+			/* ignore */
+		}
+		return response;
+	};
+}
+
+function noteRumSessionRecordingActive() {
+	if (rumSessionHasRecording) return;
+	rumSessionHasRecording = true;
+	// Emit one event after the SDK marks the recorder active so Coralogix sees hasRecording: true.
+	void import('@coralogix/browser').then(({ CoralogixRum }) => {
+		if (CoralogixRum.isInited) {
+			CoralogixRum.info('[svelteRum] session recording active');
+		}
+	});
+}
+
+/** Nudge the SDK to start session replay (no-op until init + worker are ready). */
+function kickRumSessionRecording() {
+	if (typeof window === 'undefined') return;
+	const rum = window.CoralogixRum;
+	if (rum?.isInited && typeof rum.startSessionRecording === 'function') {
+		rum.startSessionRecording();
+	}
+}
+
+function scheduleRumSessionRecordingKickoff() {
+	kickRumSessionRecording();
+	for (const delayMs of [500, 1500, 3000]) {
+		setTimeout(kickRumSessionRecording, delayMs);
 	}
 }
 
@@ -106,6 +169,7 @@ export async function waitForRumSessionRecording(timeoutMs = 15000): Promise<boo
 	const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
 	while (Date.now() < deadline) {
 		if (rumSessionHasRecording) return true;
+		kickRumSessionRecording();
 		await new Promise((r) => setTimeout(r, 250));
 	}
 	return rumSessionHasRecording;
@@ -173,6 +237,7 @@ export async function initCoralogixRum(
 		return;
 	}
 	rumSessionHasRecording = false;
+	installSessionRecordingFetchHook();
 	const sdkUserContext = toSdkUserContext(userContext);
 	activeSdkUserContext = sdkUserContext;
 	const { CoralogixRum } = await import('@coralogix/browser');
@@ -193,7 +258,8 @@ export async function initCoralogixRum(
 			sessionRecordingSampleRate: 100,
 			immediateFlush: true,
 			inlineImages: true,
-			dataURLOptions: { type: 'image/webp', quality: 0.75 }
+			dataURLOptions: { type: 'image/webp', quality: 0.75 },
+			workerUrl: CORALOGIX_RUM_WORKER_URL
 		},
 		traceParentInHeader: {
 			enabled: true,
@@ -216,6 +282,7 @@ export async function initCoralogixRum(
 	if (typeof CoralogixRum.setUserContext === 'function') {
 		CoralogixRum.setUserContext(sdkUserContext);
 	}
+	scheduleRumSessionRecordingKickoff();
 	installHarnessHooks();
 }
 
