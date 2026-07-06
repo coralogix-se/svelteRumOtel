@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
-import { killHarnessChildProcesses } from './rum-harness-chrome-cleanup.mjs';
+import { killAllBrowserProcesses, killProcessTree, countZombieBrowserProcesses } from './rum-harness-chrome-cleanup.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -40,13 +40,18 @@ function logProcessBudget() {
 	const procCount = spawnSync('sh', ['-c', 'ls -1 /proc 2>/dev/null | wc -l'], {
 		encoding: 'utf8'
 	});
-	const chromiumCount = spawnSync('sh', ['-c', 'pgrep -c chromium 2>/dev/null || echo 0'], {
-		encoding: 'utf8'
-	});
+	const chromiumCount = spawnSync(
+		'sh',
+		['-c', "pgrep -cf 'chromium|chrome_crashpad|google-chrome' 2>/dev/null || echo 0"],
+		{ encoding: 'utf8' }
+	);
 	const procs = procCount.stdout?.trim() ?? '?';
 	const chromes = chromiumCount.stdout?.trim() ?? '?';
+	const zombies = countZombieBrowserProcesses();
 	const warn = Number(procs) > 300 ? ' WARN_HIGH_PROC_COUNT' : '';
-	console.log(`[rum-harness-loop] process budget: procs=${procs} chromium=${chromes}${warn}`);
+	console.log(
+		`[rum-harness-loop] process budget: procs=${procs} chromium=${chromes} zombies=${zombies}${warn}`
+	);
 }
 
 function harnessEntrypoint() {
@@ -99,18 +104,26 @@ async function runHarness() {
     const onClose = (code, signal) => {
       clearTimeout(killTimer);
       if (deathWatch) clearTimeout(deathWatch);
-      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-        reject(new Error(`Harness killed (${signal}) after ${spawnMaxMs}ms cap`));
-        return;
-      }
-      if (code === 0) resolve();
-      else reject(new Error(`Exit ${code}`));
+      void (async () => {
+        if (child.pid) killProcessTree(child.pid);
+        await killAllBrowserProcesses();
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          reject(new Error(`Harness killed (${signal}) after ${spawnMaxMs}ms cap`));
+          return;
+        }
+        if (code === 0) resolve();
+        else reject(new Error(`Exit ${code}`));
+      })();
     };
     child.on('close', onClose);
     child.on('error', (err) => {
       clearTimeout(killTimer);
       if (deathWatch) clearTimeout(deathWatch);
-      reject(err);
+      void (async () => {
+        if (child.pid) killProcessTree(child.pid);
+        await killAllBrowserProcesses();
+        reject(err);
+      })();
     });
   });
 }
@@ -129,7 +142,7 @@ async function loop() {
       const failIso = new Date().toISOString();
       console.error(`[${failIso}] Harness failed:`, err.message);
     } finally {
-      killHarnessChildProcesses();
+      await killAllBrowserProcesses();
       logProcessBudget();
     }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));

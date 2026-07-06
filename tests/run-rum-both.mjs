@@ -24,6 +24,7 @@ import { spawn } from 'child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { killAllBrowserProcesses, killProcessTree } from './rum-harness-chrome-cleanup.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -102,21 +103,29 @@ function runHarnessOnce(label, baseUrl) {
     child.on('close', (code, signal) => {
       clearTimeout(killTimer);
       if (deathWatch) clearTimeout(deathWatch);
-      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-        reject(
-          new Error(
-            `Harness killed (${signal}) after ${PER_HARNESS_SPAWN_MAX_MS}ms (${label})`
-          )
-        );
-        return;
-      }
-      if (code === 0) resolve();
-      else reject(new Error(`Harness exit ${code} (${label})`));
+      void (async () => {
+        if (child.pid) killProcessTree(child.pid);
+        await killAllBrowserProcesses();
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          reject(
+            new Error(
+              `Harness killed (${signal}) after ${PER_HARNESS_SPAWN_MAX_MS}ms (${label})`
+            )
+          );
+          return;
+        }
+        if (code === 0) resolve();
+        else reject(new Error(`Harness exit ${code} (${label})`));
+      })();
     });
     child.on('error', (err) => {
       clearTimeout(killTimer);
       if (deathWatch) clearTimeout(deathWatch);
-      reject(err);
+      void (async () => {
+        if (child.pid) killProcessTree(child.pid);
+        await killAllBrowserProcesses();
+        reject(err);
+      })();
     });
   });
 }

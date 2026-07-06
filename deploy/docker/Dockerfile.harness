@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 
+# Reap Chromium zombie (<defunct>) children; Node as PID 1 does not wait on reparented zombies.
+ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64 /usr/bin/tini
+RUN chmod +x /usr/bin/tini
+
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
 	PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
@@ -26,5 +30,7 @@ COPY tests/rum-harness.mjs tests/run-rum-both.mjs tests/rum-harness-loop.mjs tes
 ENV BASE_URL_TEAM_A=http://chat-frontend-team-a.ai-agent-sim.svc.cluster.local \
 	BASE_URL_TEAM_B=http://chat-frontend-team-b.ai-agent-sim.svc.cluster.local
 
+# tini reaps Chromium zombie children (defunct) that Node does not wait on.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 # Continuous loop: rum-harness-loop calls run-rum-both when both team URLs are set
 CMD ["node", "tests/rum-harness-loop.mjs"]

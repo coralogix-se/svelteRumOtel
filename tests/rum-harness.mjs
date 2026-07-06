@@ -23,9 +23,17 @@
  */
 
 import crypto from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import puppeteer from 'puppeteer';
 import { applyHarnessRumUserContext } from './rum-user-context.mjs';
-import { disposePuppeteerBrowser } from './rum-harness-chrome-cleanup.mjs';
+import {
+	disposePuppeteerBrowser,
+	findBrowserProcessPids,
+	killAllBrowserProcesses,
+	killBrowserProcessesExcept
+} from './rum-harness-chrome-cleanup.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:5173';
 
@@ -503,13 +511,25 @@ function baseChromiumArgs() {
 }
 
 async function main() {
+	await killAllBrowserProcesses();
+	const baselineBrowserPids = new Set(findBrowserProcessPids());
+
 	const execPath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
 	const chromiumArgs = baseChromiumArgs();
-	const browser = await puppeteer.launch({
-		headless: true,
-		...(execPath ? { executablePath: execPath } : {}),
-		args: chromiumArgs,
-	});
+	const userDataDir = mkdtempSync(join(tmpdir(), 'puppeteer-rum-'));
+	let browser;
+	try {
+		browser = await puppeteer.launch({
+			headless: true,
+			userDataDir,
+			...(execPath ? { executablePath: execPath } : {}),
+			args: chromiumArgs
+		});
+	} catch (err) {
+		await disposePuppeteerBrowser(browser, { userDataDir });
+		await killBrowserProcessesExcept(baselineBrowserPids);
+		throw err;
+	}
 
 	let exitCode = 0;
 	try {
@@ -519,7 +539,8 @@ async function main() {
 		console.error('RUM harness error:', msg);
 		exitCode = 1;
 	} finally {
-		await disposePuppeteerBrowser(browser);
+		await disposePuppeteerBrowser(browser, { userDataDir });
+		await killBrowserProcessesExcept(baselineBrowserPids);
 	}
 	process.exit(exitCode);
 }
