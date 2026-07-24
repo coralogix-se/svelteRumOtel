@@ -1,10 +1,10 @@
 """
-Chat API backend with Gemini 2.5 Flash Lite.
+Multi-agent chat API backend powered by Strands and Gemini.
 
 OpenTelemetry sends traces and application logs to a **local OpenTelemetry Collector** over OTLP/gRPC
 (default ``http://localhost:4317``). Configure the collector to forward to Coralogix (see
-``otel-collector-config.yaml``). GenAI spans use OpenTelemetry's Google GenAI SDK instrumentation
-(``gen_ai.*`` semantics). See https://coralogix.com/docs/user-guides/ai/otel-integration/
+``otel-collector-config.yaml``). Strands emits agent, model, and tool spans using OpenTelemetry
+GenAI semantic conventions. See https://coralogix.com/docs/user-guides/ai/otel-integration/
 
 After ``.env`` is loaded you may set:
 
@@ -34,16 +34,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from opentelemetry.instrumentation.google_genai import GoogleGenAiSdkInstrumentor
 
 # Load .env from backend/ and project root
 load_dotenv()
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Coralogix AI Center / GenAI semconv guidance (https://coralogix.com/docs/user-guides/ai/otel-integration/)
-os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental")
+os.environ.setdefault(
+    "OTEL_SEMCONV_STABILITY_OPT_IN",
+    "gen_ai_latest_experimental,gen_ai_tool_definitions,gen_ai_span_attributes_only",
+)
 os.environ.setdefault(
     "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "SPAN_AND_EVENT"
 )
@@ -53,42 +53,6 @@ _otel_sdk_disabled = os.getenv("OTEL_SDK_DISABLED", "").lower().strip() in (
     "1",
     "yes",
 )
-
-
-def _patch_google_genai_for_ai_center_evaluations() -> None:
-    """AI Center evaluation policies require gen_ai.system on GenAI spans.
-
-    With OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental the Google GenAI
-    instrumentor records gen_ai.input.messages but skips process_request(), so
-    gen_ai.system / gen_ai.provider.name are never set and Policy Catalog evals do not run.
-    """
-    try:
-        from opentelemetry.instrumentation.google_genai import (
-            generate_content as google_genai_gc,
-        )
-    except ImportError:
-        return
-
-    _provider = "gcp.gemini"
-    _orig = (
-        google_genai_gc._GenerateContentInstrumentationHelper._maybe_log_completion_details_in_span
-    )
-
-    def _maybe_log_completion_details_in_span(
-        self,
-        span,
-        completion_details_attributes,
-        tool_definitions=None,
-    ):
-        _orig(self, span, completion_details_attributes, tool_definitions)
-        if span.is_recording():
-            span.set_attribute("gen_ai.provider.name", _provider)
-            span.set_attribute("gen_ai.system", _provider)
-
-    google_genai_gc._GenerateContentInstrumentationHelper._maybe_log_completion_details_in_span = (  # noqa: SLF001
-        _maybe_log_completion_details_in_span
-    )
-
 
 from opentelemetry import trace
 from opentelemetry._logs import set_logger_provider
@@ -132,8 +96,6 @@ if _otel_export_enabled:
         )
     )
     trace.set_tracer_provider(_tracer_provider)
-    GoogleGenAiSdkInstrumentor().instrument()
-    _patch_google_genai_for_ai_center_evaluations()
 
     from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 
@@ -171,6 +133,7 @@ from cx_guardrails import (
 from cx_guardrails.models.response import GuardrailsResponse
 from cx_guardrails.span_builder import generate_guardrail_response_attributes
 
+from chat_orchestrator import DEFAULT_MODEL, run_chat
 from image_search import (
     format_image_markdown,
     image_search_query,
@@ -180,14 +143,6 @@ from image_search import (
     user_wants_image,
 )
 
-MODEL = "gemini-2.5-flash-lite"
-
-_GEMINI_SYSTEM_INSTRUCTION = """You are a friendly general-purpose assistant.
-
-When the user asks for one or more pictures, photos, or images of anything, write a short caption only (1–2 sentences). Do not refuse or say you can only show certain topics. Never use Markdown image syntax, placeholder icons, or made-up URLs — the app attaches real web photos automatically (including multiple images when they ask for several).
-
-For other messages, answer helpfully in plain text. Keep responses concise."""
-
 # Model sometimes still refuses; replace when we attach a web image anyway.
 _IMAGE_REFUSAL_RE = re.compile(
     r"\b(?:can only show|only (?:show|provide) (?:pictures|images)|"
@@ -196,9 +151,6 @@ _IMAGE_REFUSAL_RE = re.compile(
     r"my apologies.*(?:only|cannot))\b",
     re.I,
 )
-
-_GEMINI_CONFIG = types.GenerateContentConfig(system_instruction=_GEMINI_SYSTEM_INSTRUCTION)
-
 
 async def _finalize_chat_message(
     user_message: str, text: str, *, is_harness: bool = False
@@ -591,8 +543,6 @@ async def chat(http_request: Request, body: ChatRequest):
             detail="Gemini API key not configured. Add GEMINI_API_KEY to .env",
         )
 
-    client = genai.Client(api_key=api_key)
-
     # Harness UA (test_harness) only skips simulated chat errors above — Guardrails still run like production.
     use_guardrails = _guardrails is not None
     effective_message = body.message
@@ -621,19 +571,7 @@ async def chat(http_request: Request, body: ChatRequest):
                 },
             )
 
-    contents = [
-        *[
-            types.Content(
-                role="user" if m.role == "user" else "model",
-                parts=[types.Part.from_text(text=m.content)],
-            )
-            for m in body.history
-        ],
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=effective_message)],
-        ),
-    ]
+    history = [{"role": m.role, "content": m.content} for m in body.history]
 
     try:
         if use_guardrails:
@@ -685,12 +623,12 @@ async def chat(http_request: Request, body: ChatRequest):
                         "GUARDRAILS_FAIL_OPEN_ON_UNAVAILABLE or observe-only: continuing without prompt guard check",
                     )
 
-                response = await client.aio.models.generate_content(
-                    model=MODEL,
-                    contents=contents,
-                    config=_GEMINI_CONFIG,
+                text = await run_chat(
+                    effective_message,
+                    history,
+                    api_key=api_key,
+                    is_harness=is_harness,
                 )
-                text = response.text or "No response generated."
                 if response_demo_override is not None:
                     text = response_demo_override
                 else:
@@ -731,29 +669,28 @@ async def chat(http_request: Request, body: ChatRequest):
                         "Guardrails response check skipped (service error); returning model text",
                     )
         else:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=contents,
-                config=_GEMINI_CONFIG,
+            text = await run_chat(
+                effective_message,
+                history,
+                api_key=api_key,
+                is_harness=is_harness,
             )
             text = await _finalize_chat_message(
                 body.message,
-                response.text or "No response generated.",
+                text,
                 is_harness=is_harness,
             )
 
         logger.info(
             "Chat response sent",
-            extra={"response_length": len(text), "model": MODEL},
+            extra={"response_length": len(text), "model": os.getenv("STRANDS_MODEL_ID", DEFAULT_MODEL)},
         )
         return ChatResponse(message=text)
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Gemini API error")
+        logger.exception("Strands agent error")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        client.close()
 
 
 @app.get("/health")

@@ -180,7 +180,7 @@
 <div class="chatbot">
 	<header>
 		<h1>{data.chatTitle}</h1>
-		<p>Powered by Gemini 2.5 Flash Lite</p>
+		<p>Powered by Strands multi-agent orchestration and Gemini 2.5 Flash Lite</p>
 	</header>
 
 	<div class="messages" role="log" bind:this={messagesEl}>

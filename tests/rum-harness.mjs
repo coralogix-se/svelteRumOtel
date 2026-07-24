@@ -131,39 +131,18 @@ function waitForThisChatResponse(page, question) {
 	);
 }
 
-/**
- * Set input value in a way Svelte 5 bind:value actually sees, then submit once via form.requestSubmit().
- * Avoids page.click(button) which can interact with duplicate/injected controls in some environments.
- */
+/** Type through Puppeteer's keyboard so framework bindings receive real input events, then submit once. */
 async function submitQuestion(page, question) {
 	const responsePromise = waitForThisChatResponse(page, question);
-	// Defer requestSubmit one microtask so Svelte bind:value commits before send() reads input.
+	const selector = '.chatbot input[aria-label="Chat message"]';
+	await page.focus(selector);
+	await page.keyboard.type(question);
 	await withTimeout(
-		page.evaluate((q) => {
-			return new Promise((resolve, reject) => {
-				const root = document.querySelector('.chatbot');
-				const inputEl = root?.querySelector('input[aria-label="Chat message"]');
-				const form = inputEl?.closest('form');
-				if (!inputEl || !form) {
-					reject(new Error('Chat form not found'));
-					return;
-				}
-				const setter = Object.getOwnPropertyDescriptor(
-					window.HTMLInputElement.prototype,
-					'value'
-				).set;
-				setter.call(inputEl, q);
-				inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-				queueMicrotask(() => {
-					try {
-						form.requestSubmit();
-						resolve();
-					} catch (e) {
-						reject(e);
-					}
-				});
-			});
-		}, question),
+		page.$eval(selector, (inputEl) => {
+			const form = inputEl.closest('form');
+			if (!form) throw new Error('Chat form not found');
+			form.requestSubmit();
+		}),
 		EVALUATE_TIMEOUT_MS,
 		'chat form submit evaluate'
 	);

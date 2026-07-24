@@ -1,11 +1,12 @@
 # svelteRum
 
-SvelteKit chatbot with Coralogix RUM (Real User Monitoring), OpenTelemetry tracing, and Google Gemini 2.5 Flash Lite. Includes session replay, trace propagation from frontend to backend, and AI span tracing for observability in Coralogix.
+SvelteKit chatbot with a Strands coordinator and specialist agents backed by Google Gemini 2.5 Flash Lite. Includes Coralogix RUM, session replay, end-to-end OpenTelemetry trace propagation, Guardrails, and agent/model/tool spans for Coralogix AI Center.
 
 ## Architecture
 
 - **Frontend**: SvelteKit app with Coralogix RUM (session replay, trace propagation to backend)
-- **Backend**: Python FastAPI + Gemini 2.5 Flash Lite, with OpenTelemetry GenAI instrumentation and OTLP export to a local collector (collector forwards to Coralogix)
+- **Backend**: Python FastAPI + Strands Agents (coordinator, knowledge specialist, visual-caption specialist) using Gemini 2.5 Flash Lite
+- **Observability**: Strands reuses the API's global OpenTelemetry provider and emits GenAI agent/model/tool spans to the local collector, which forwards to Coralogix
 - **Source Viewer**: Browser-based source code viewer with syntax highlighting at `/source`
 
 ## Prerequisites
@@ -41,6 +42,8 @@ Edit `.env` with your values:
 | `GUARDRAILS_ENABLED` | Optional. `true` to enforce blocking on policy hits; `false` for observe-only (default). |
 | `VITE_CORALOGIX_RUM_KEY` | Coralogix RUM key (browser monitoring) |
 | `GEMINI_API_KEY` | Google AI Studio API key |
+| `STRANDS_MODEL_ID` | Optional Strands Gemini model override (default: `gemini-2.5-flash-lite`) |
+| `STRANDS_MAX_TURNS` | Optional maximum coordinator turns per request (default: `8`) |
 | `VITE_CHAT_API_URL` | Backend API URL (default: `http://localhost:8000`) |
 
 ### 3. Run
@@ -75,8 +78,10 @@ npm run dev
 ## Project Structure
 
 ```
-├── backend/           # Python FastAPI + Gemini
-│   ├── main.py        # Chat API, OTLP traces/logs + GenAI instrumentation → collector
+├── backend/           # Python FastAPI + Strands Agents + Gemini
+│   ├── agents/        # Coordinator and specialist topology
+│   ├── chat_orchestrator.py
+│   ├── main.py        # Chat API, Guardrails, OTLP traces/logs → collector
 │   └── requirements.txt
 ├── src/
 │   ├── lib/

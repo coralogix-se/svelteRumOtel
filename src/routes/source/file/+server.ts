@@ -1,14 +1,14 @@
 import { isForbiddenSourceRead } from '$lib/source-view-policy';
 import { readFile } from 'node:fs/promises';
-import { join, resolve, relative } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const ROOT = process.cwd();
 
 function safePath(input: string): string | null {
-	const normalized = resolve(ROOT, input).replace(/\\/g, '/');
-	const root = ROOT.replace(/\\/g, '/');
-	if (!normalized.startsWith(root) || normalized === root) return null;
-	return relative(ROOT, normalized).replace(/\\/g, '/');
+	const normalized = resolve(ROOT, input);
+	const rel = relative(ROOT, normalized);
+	if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+	return rel.replace(/\\/g, '/');
 }
 
 export async function GET({ url }) {
