@@ -544,7 +544,7 @@ spec:
       serviceAccountName: otel-collector-chatbot
       containers:
         - name: otelcol
-          image: otel/opentelemetry-collector-contrib:0.151.0
+          image: otel/opentelemetry-collector-contrib:0.158.0
           args:
             - --config=/etc/otelcol/config.yaml
             - --feature-gates=+service.profilesSupport,+connector.spanmetrics.legacyMetricNames
